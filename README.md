@@ -41,7 +41,7 @@ A `no_std` Rust demo for the Waveshare ESP32-C6-Touch-LCD-1.47 module.
 
 - Rust toolchain with `rustup target add riscv32imc-unknown-none-elf`
 - `espflash` CLI: `cargo install espflash`
-- ESP32-C6 flashed with bootloader (see [ESP Rust Book](https://esp-rs.github.io/book/installation/index.html))
+- ESP32-C6 flashed with bootloader (see [ESP Rust Book](https://docs.espressif.com/projects/rust/book/))
 
 ## Build & Flash
 

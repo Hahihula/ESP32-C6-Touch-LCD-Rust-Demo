@@ -44,6 +44,9 @@ use axs5106l::{Axs5106l, Rotation};
 use embedded_hal_bus::i2c::RefCellDevice;
 use core::cell::RefCell;
 
+mod ferris_bitmap;
+use ferris_bitmap::{QR_CODE, QR_WIDTH, QR_HEIGHT, QR_BYTES_PER_ROW, FERRIS_DATA, FERRIS_WIDTH, FERRIS_HEIGHT};
+
 // LCD constants
 const LCD_CMD_SLPOUT: u8 = 0x11;
 const LCD_CMD_DISPON: u8 = 0x29;
@@ -61,6 +64,9 @@ const LCD_BUFFER_SIZE: usize = LCD_H_RES * LCD_V_RES;
 // Display dimensions for touch controller
 const DISPLAY_WIDTH: u16 = LCD_H_RES as u16;
 const DISPLAY_HEIGHT: u16 = LCD_V_RES as u16;
+
+// QR code scale factor (35 * 4 = 140px, fits on 172px display)
+const QR_SCALE: usize = 4;
 
 // Send command to LCD
 fn lcd_write_cmd(spi: &mut Spi<'_, esp_hal::Blocking>, cs: &mut Output, dc: &mut Output, cmd: u8) {
@@ -243,6 +249,57 @@ impl embedded_graphics::prelude::OriginDimensions for FrameBuffer {
     }
 }
 
+// Draw Ferris bitmap from RGB565 data, scaled 2x (each pixel drawn as 2x2 block)
+fn draw_ferris(fb: &mut FrameBuffer, start_x: i32, start_y: i32) {
+    for y in 0..FERRIS_HEIGHT {
+        for x in 0..FERRIS_WIDTH {
+            let rgb565 = FERRIS_DATA[y * FERRIS_WIDTH + x];
+            // Skip white pixels (background) for transparency effect
+            if rgb565 == 0xFFFF {
+                continue;
+            }
+            let color = Rgb565::new(
+                ((rgb565 >> 11) & 0x1F) as u8,
+                ((rgb565 >> 5) & 0x3F) as u8,
+                (rgb565 & 0x1F) as u8,
+            );
+            // Draw 2x2 block
+            let px = start_x + (x as i32) * 2;
+            let py = start_y + (y as i32) * 2;
+            if let Some(p) = fb.pixel_mut(px, py) { *p = color; }
+            if let Some(p) = fb.pixel_mut(px + 1, py) { *p = color; }
+            if let Some(p) = fb.pixel_mut(px, py + 1) { *p = color; }
+            if let Some(p) = fb.pixel_mut(px + 1, py + 1) { *p = color; }
+        }
+    }
+}
+ 
+// Draw QR code at specified position (each module = QR_SCALE x QR_SCALE pixels)
+// Bit encoding: 1=white, 0=black, MSB first
+fn draw_qr_code(fb: &mut FrameBuffer, start_x: i32, start_y: i32) {
+    for y in 0..QR_HEIGHT {
+        for x in 0..QR_WIDTH {
+            let byte_idx = y * QR_BYTES_PER_ROW + (x / 8);
+            let bit_idx = 7 - (x % 8);
+            if byte_idx < QR_CODE.len() {
+                let is_white = (QR_CODE[byte_idx] & (1 << bit_idx)) != 0;
+                let color = if is_white { Rgb565::WHITE } else { Rgb565::BLACK };
+                // Draw QR_SCALE x QR_SCALE block for each QR module
+                for dy in 0..QR_SCALE {
+                    for dx in 0..QR_SCALE {
+                        if let Some(p) = fb.pixel_mut(
+                            start_x + (x * QR_SCALE + dx) as i32,
+                            start_y + (y * QR_SCALE + dy) as i32,
+                        ) {
+                            *p = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
@@ -339,7 +396,7 @@ async fn main(_spawner: Spawner) {
     // Create framebuffer
     let mut fb = FrameBuffer::new();
 
-    // Page state: 0 = touch demo, 1 = IMU demo, 2 = system info
+    // Page state: 0 = touch demo, 1 = IMU demo, 2 = system info, 3 = about (Ferris + QR)
     let mut current_page: u8 = 0;
     let mut button_pressed = false;
 
@@ -371,7 +428,7 @@ async fn main(_spawner: Spawner) {
         // Check button with debounce
         if button.is_low() && !button_pressed {
             button_pressed = true;
-            current_page = (current_page + 1) % 3;
+            current_page = (current_page + 1) % 4;
 
             match current_page {
                 0 => {
@@ -409,6 +466,27 @@ async fn main(_spawner: Spawner) {
                     Text::new("  Touch: AXS5106L", Point::new(10, 270), text_style).draw(&mut fb).ok();
                     Text::new("  IMU: QMI8658", Point::new(10, 290), text_style).draw(&mut fb).ok();
                     println!("Switched to system page");
+                }
+                3 => {
+                    // About page with Ferris and QR code (vertical layout)
+                    fb.clear(Rgb565::WHITE);
+                    Text::new("About", Point::new(60, 15), title_style).draw(&mut fb).ok();
+ 
+                    // Draw Ferris centered horizontally
+                    // Display is 172 wide, Ferris is 160, center = (172-160)/2 = 6
+                    draw_ferris(&mut fb, 6, -10);
+ 
+                    // Draw QR code below Ferris
+                    // QR is 35x35, scaled 4x = 140x140 pixels
+                    // Position: centered at x = (172-140)/2 = 16
+                    draw_qr_code(&mut fb, 16, 115);
+ 
+                    Text::new("Scan QR for", Point::new(50, 270), text_style).draw(&mut fb).ok();
+                    Text::new("GitHub repo!", Point::new(50, 285), text_style).draw(&mut fb).ok();
+ 
+                    Text::new("Push button", Point::new(30, 305), text_style).draw(&mut fb).ok();
+                    Text::new("for touch demo", Point::new(25, 315), text_style).draw(&mut fb).ok();
+                    println!("Switched to about page");
                 }
                 _ => {}
             }
@@ -480,6 +558,9 @@ async fn main(_spawner: Spawner) {
             }
             2 => {
                 // System info page - nothing to update
+            }
+            3 => {
+                // About page - nothing to update
             }
             _ => {}
         }
